@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Usage</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body class="state-collapsed">
+
+  <!-- ─── COLLAPSED: pill ─── -->
+  <div class="pill glass" id="pill" data-drag>
+    <div class="pill-head" data-drag>
+      <span><span class="pulse"></span>&nbsp;Usage · <span id="pillLive">live</span></span>
+      <span class="expand-icon" id="btnExpand" title="Expand">⤢</span>
+    </div>
+
+    <div class="pill-row claude">
+      <div class="lbl">Claude</div>
+      <div class="bar-wrap">
+        <div class="bar" id="pill5hClaudeBar" style="background:#D97757;"></div>
+        <div class="weekly-tick" id="pillWkClaudeTick"></div>
+      </div>
+      <div class="pct" id="pill5hClaudePct" style="color:#E89571;">—</div>
+    </div>
+
+    <div class="pill-row codex">
+      <div class="lbl">Codex</div>
+      <div class="bar-wrap">
+        <div class="bar" id="pill5hCodexBar" style="background:#10A37F;"></div>
+        <div class="weekly-tick" id="pillWkCodexTick"></div>
+      </div>
+      <div class="pct" id="pill5hCodexPct" style="color:#19C37D;">—</div>
+    </div>
+
+    <div class="pill-meta">
+      <span>Weekly · <strong id="pillWkClaude" style="color:#E89571;">—</strong> · <strong id="pillWkCodex" style="color:#19C37D;">—</strong></span>
+      <span>ROI <strong id="pillRoi" style="color:#5FB27A;">—</strong></span>
+    </div>
+  </div>
+
+  <!-- ─── EXPANDED: panel ─── -->
+  <div class="panel glass" id="panel">
+    <div class="panel-head" data-drag>
+      <div>
+        <h3>Subscription Usage</h3>
+        <div class="desc">All percentages = used of cap · live from local logs</div>
+      </div>
+      <div class="head-right">
+        <div class="head-time" id="headTime">—</div>
+        <div class="live-tag"><span class="pulse"></span> <span id="headLive">live</span></div>
+        <div class="head-actions">
+          <button class="iconbtn" id="btnRefresh" title="Refresh now">↻</button>
+          <button class="iconbtn" id="btnSettings" title="Settings">⚙</button>
+          <button class="iconbtn" id="btnCollapse" title="Collapse">⤡</button>
+          <button class="iconbtn" id="btnHide" title="Hide">×</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Empty state when neither vendor is connected -->
+    <div class="empty-state" id="emptyState" style="display:none;">
+      <h4>No subscription connected</h4>
+      <p>Install + authenticate at least one CLI to see your usage.</p>
+      <div class="empty-actions">
+        <a class="empty-btn claude" href="https://docs.anthropic.com/claude-code" target="_blank" rel="noopener">Install Claude Code</a>
+        <a class="empty-btn codex"  href="https://github.com/openai/codex" target="_blank" rel="noopener">Install Codex CLI</a>
+      </div>
+      <p class="empty-hint">After install: run <code>claude setup-token</code> or <code>codex login</code>, then refresh.</p>
+    </div>
+
+    <div class="brand-cards" id="brandCards">
+      <!-- Claude card -->
+      <div class="card claude" id="cardClaude">
+        <h4>
+          <span class="swatch" style="background:#D97757; box-shadow:0 0 6px #D97757;"></span>
+          <span class="name">Claude Code</span>
+          <span class="tier" id="claudeTier">MAX 5× · $100</span>
+        </h4>
+
+        <div class="freshness" id="claudeFreshness">data: —</div>
+
+        <div class="ring-row">
+          <div class="ring-mini">
+            <svg width="74" height="74" viewBox="0 0 74 74">
+              <circle cx="37" cy="37" r="30" stroke="rgba(255,255,255,0.08)" stroke-width="5.5" fill="none"/>
+              <circle id="claudeRing5h" cx="37" cy="37" r="30" stroke="url(#cgClaude)" stroke-width="5.5" fill="none"
+                stroke-dasharray="188" stroke-dashoffset="188" stroke-linecap="round"
+                transform="rotate(-90 37 37)"/>
+              <text id="claudePct5h" x="37" y="35" text-anchor="middle" fill="#F0EEE6" font-size="15" font-weight="600">—</text>
+              <text x="37" y="48" text-anchor="middle" fill="#8a93a1" font-size="8">5-HOUR</text>
+              <defs><linearGradient id="cgClaude" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stop-color="#E89571"/><stop offset="100%" stop-color="#C96442"/>
+              </linearGradient></defs>
+            </svg>
+            <span class="cap">resets <span id="claudeReset5h">—</span></span>
+          </div>
+          <div class="ring-mini">
+            <svg width="74" height="74" viewBox="0 0 74 74">
+              <circle cx="37" cy="37" r="30" stroke="rgba(255,255,255,0.08)" stroke-width="5.5" fill="none"/>
+              <circle id="claudeRingWk" cx="37" cy="37" r="30" stroke="url(#cgClaude2)" stroke-width="5.5" fill="none"
+                stroke-dasharray="188" stroke-dashoffset="188" stroke-linecap="round"
+                transform="rotate(-90 37 37)"/>
+              <text id="claudePctWk" x="37" y="35" text-anchor="middle" fill="#F0EEE6" font-size="15" font-weight="600">—</text>
+              <text x="37" y="48" text-anchor="middle" fill="#8a93a1" font-size="8">WEEKLY</text>
+              <defs><linearGradient id="cgClaude2" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stop-color="#E89571"/><stop offset="100%" stop-color="#C96442"/>
+              </linearGradient></defs>
+            </svg>
+            <span class="cap">resets <span id="claudeResetWk">—</span></span>
+          </div>
+        </div>
+
+        <div class="separator"></div>
+
+        <div class="stats-grid">
+          <div class="stat-row"><span class="k">tokens in</span><span class="v" id="claudeIn">—</span></div>
+          <div class="stat-row"><span class="k">tokens out</span><span class="v" id="claudeOut">—</span></div>
+          <div class="stat-row"><span class="k">cache read</span><span class="v" id="claudeCacheR">—</span></div>
+          <div class="stat-row"><span class="k">cache write</span><span class="v" id="claudeCacheW">—</span></div>
+          <div class="stat-row"><span class="k">requests</span><span class="v" id="claudeReq">—</span></div>
+          <div class="stat-row"><span class="k">api equiv</span><span class="v claude-v" id="claudeCost">—</span></div>
+        </div>
+      </div>
+
+      <!-- Codex card -->
+      <div class="card codex" id="cardCodex">
+        <h4>
+          <span class="swatch" style="background:#10A37F; box-shadow:0 0 6px #10A37F;"></span>
+          <span class="name">Codex</span>
+          <span class="tier" id="codexTier">PRO 5× · $100</span>
+        </h4>
+
+        <div class="freshness" id="codexFreshness">data: —</div>
+
+        <div class="ring-row">
+          <div class="ring-mini">
+            <svg width="74" height="74" viewBox="0 0 74 74">
+              <circle cx="37" cy="37" r="30" stroke="rgba(255,255,255,0.08)" stroke-width="5.5" fill="none"/>
+              <circle id="codexRing5h" cx="37" cy="37" r="30" stroke="url(#cgCodex)" stroke-width="5.5" fill="none"
+                stroke-dasharray="188" stroke-dashoffset="188" stroke-linecap="round"
+                transform="rotate(-90 37 37)"/>
+              <text id="codexPct5h" x="37" y="35" text-anchor="middle" fill="#F0EEE6" font-size="15" font-weight="600">—</text>
+              <text x="37" y="48" text-anchor="middle" fill="#8a93a1" font-size="8">5-HOUR</text>
+              <defs><linearGradient id="cgCodex" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stop-color="#19C37D"/><stop offset="100%" stop-color="#0D7A5F"/>
+              </linearGradient></defs>
+            </svg>
+            <span class="cap">resets <span id="codexReset5h">—</span></span>
+          </div>
+          <div class="ring-mini">
+            <svg width="74" height="74" viewBox="0 0 74 74">
+              <circle cx="37" cy="37" r="30" stroke="rgba(255,255,255,0.08)" stroke-width="5.5" fill="none"/>
+              <circle id="codexRingWk" cx="37" cy="37" r="30" stroke="#E0B341" stroke-width="5.5" fill="none"
+                stroke-dasharray="188" stroke-dashoffset="188" stroke-linecap="round"
+                transform="rotate(-90 37 37)"/>
+              <text id="codexPctWk" x="37" y="35" text-anchor="middle" fill="#F0EEE6" font-size="15" font-weight="600">—</text>
+              <text x="37" y="48" text-anchor="middle" fill="#8a93a1" font-size="8">WEEKLY</text>
+            </svg>
+            <span class="cap">resets <span id="codexResetWk">—</span></span>
+          </div>
+        </div>
+
+        <div class="separator"></div>
+
+        <div class="stats-grid">
+          <div class="stat-row"><span class="k">tokens in</span><span class="v" id="codexIn">—</span></div>
+          <div class="stat-row"><span class="k">tokens out</span><span class="v" id="codexOut">—</span></div>
+          <div class="stat-row"><span class="k">reasoning</span><span class="v" id="codexReason">—</span></div>
+          <div class="stat-row"><span class="k">cached</span><span class="v" id="codexCached">—</span></div>
+          <div class="stat-row"><span class="k">requests</span><span class="v" id="codexReq">—</span></div>
+          <div class="stat-row"><span class="k">api equiv</span><span class="v codex-v" id="codexCost">—</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="roi">
+      <div class="roi-cell">
+        <span class="l">Today · API equiv</span>
+        <span class="v" id="roiToday">—</span>
+        <span class="s">vs pay-as-you-go</span>
+      </div>
+      <div class="roi-cell">
+        <span class="l">MTD · API equiv</span>
+        <span class="v" id="roiMtd">—</span>
+        <span class="s" id="roiMtdSub">—</span>
+      </div>
+      <div class="roi-cell">
+        <span class="l">Subscriptions</span>
+        <span class="v" id="roiSubs">—</span>
+        <span class="s" id="roiSubsBreakdown">—</span>
+      </div>
+      <div class="roi-cell">
+        <span class="l">ROI · leverage</span>
+        <span class="v hero" id="roiLeverage">—</span>
+        <span class="s" id="roiSaved">—</span>
+      </div>
+    </div>
+
+    <!-- ─── DATA VIEW PICKER ─── -->
+    <div class="data-view" id="dataView">
+      <span class="data-view-label">Data view</span>
+      <button class="dv-chip" data-period="now" data-active="true">Now</button>
+      <button class="dv-chip" data-period="today">Today</button>
+      <button class="dv-chip" data-period="mtd">MTD</button>
+      <button class="dv-chip" data-period="1d">1D</button>
+      <button class="dv-chip" data-period="7d">7D</button>
+      <button class="dv-chip" data-period="14d">14D</button>
+      <button class="dv-chip" data-period="30d">30D</button>
+    </div>
+  </div>
+
+    <!-- ─── SETTINGS PANEL (overlay inside .panel) ─── -->
+    <div class="settings" id="settings">
+      <div class="settings-head" data-drag>
+        <h3>Settings</h3>
+        <button class="iconbtn" id="btnSettingsBack" title="Back">←</button>
+      </div>
+
+      <div class="settings-body">
+        <div class="setting-row">
+          <label for="optInterval">Refresh interval</label>
+          <select id="optInterval">
+            <option value="15000">15 seconds</option>
+            <option value="30000" selected>30 seconds</option>
+            <option value="60000">1 minute</option>
+            <option value="120000">2 minutes</option>
+            <option value="300000">5 minutes</option>
+          </select>
+        </div>
+
+        <div class="setting-row">
+          <label for="optOpacity">
+            Glass opacity
+            <span class="setting-value" id="optOpacityVal">0.55</span>
+          </label>
+          <input id="optOpacity" type="range" min="0.20" max="0.85" step="0.05" value="0.55" />
+        </div>
+
+        <div class="setting-row">
+          <label>Theme</label>
+          <div class="theme-toggle">
+            <button class="theme-btn" data-theme="dark" data-active="true">Dark</button>
+            <button class="theme-btn" data-theme="light">Light</button>
+            <button class="theme-btn" data-theme="auto">Auto</button>
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <label>Plan labels</label>
+          <div class="plan-edit">
+            <input id="optClaudeTier" type="text" placeholder="MAX 5× · $100" />
+            <input id="optCodexTier"  type="text" placeholder="PRO 5× · $100" />
+          </div>
+        </div>
+
+        <div class="settings-footer">
+          <button class="btn-secondary" id="btnResetDefaults">Reset defaults</button>
+          <span class="saved-indicator" id="savedIndicator"></span>
+          <button class="btn-primary" id="btnSaveSettings">Save</button>
+        </div>
+      </div>
+    </div>
+
+  <script src="main.js"></script>
+</body>
+</html>

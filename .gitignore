@@ -1,0 +1,24 @@
+# Build artifacts (redirected via .cargo/config.toml on Windows)
+target/
+src-tauri/target/
+
+# Node
+node_modules/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Tauri generated
+src-tauri/gen/
+src-tauri/WixTools/
+
+# Local secrets — never commit
+.env
+.env.local
+
+# OS / runtime caches
+*.log

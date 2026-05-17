@@ -1,0 +1,5 @@
+# Redirect build artifacts away from a username path containing spaces.
+# Required on Windows when the user's home path has whitespace — the MSYS2
+# assembler chokes on it. Safe to delete on systems without that constraint.
+[build]
+target-dir = "C:/rust-target/tally"
