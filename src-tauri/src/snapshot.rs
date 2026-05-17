@@ -328,30 +328,35 @@ fn short_date_time(dt: DateTime<Utc>) -> String {
     local.format("%a %-I:%M %p").to_string()
 }
 
-/// Build a WindowState, normalizing past resets_at values.
+/// Build a WindowState, normalizing past resets_at labels.
 ///
 /// Claude/Codex rate-limit APIs return a `resets_at` that points at the END
 /// of the *current* active window. Once that timestamp passes with no new
 /// activity, the server keeps returning the same (now-stale) timestamp until
-/// the user sends a new message that starts a fresh window. Surfacing a past
-/// time to the user looks like a stuck clock. Treat past timestamps as "no
-/// active window — ready to start" with 0% used.
+/// the user sends a new message that starts a fresh window. A stale or absent
+/// timestamp should not erase a valid utilization percentage; it only means we
+/// cannot show an exact reset clock.
 fn build_window(
     raw_percent: f64,
     resets_at: Option<DateTime<Utc>>,
     fmt: fn(DateTime<Utc>) -> String,
 ) -> WindowState {
     let now = Utc::now();
+    let used_percent = raw_percent.clamp(0.0, 100.0);
     match resets_at {
         Some(t) if t > now => WindowState {
-            used_percent: raw_percent,
+            used_percent,
             resets_at: Some(t),
             resets_label: fmt(t),
         },
         _ => WindowState {
-            used_percent: 0.0,
+            used_percent,
             resets_at: None,
-            resets_label: "Ready".to_string(),
+            resets_label: if used_percent > 0.0 {
+                "Reset pending".to_string()
+            } else {
+                "Ready".to_string()
+            },
         },
     }
 }

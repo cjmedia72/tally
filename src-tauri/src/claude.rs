@@ -66,10 +66,59 @@ fn disk_cache_path() -> Option<std::path::PathBuf> {
     Some(p)
 }
 
+fn legacy_disk_cache_paths() -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+
+    if let Some(mut p) = dirs::cache_dir() {
+        p.push("usage-widget");
+        p.push("claude-usage-cache.json");
+        paths.push(p);
+    }
+
+    if let Some(mut local) = dirs::data_local_dir() {
+        local.push("usage-widget");
+        local.push("claude-usage-cache.json");
+        paths.push(local);
+    }
+
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        let mut packages = std::path::PathBuf::from(local_app_data);
+        packages.push("Packages");
+        if let Ok(entries) = std::fs::read_dir(packages) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.to_ascii_lowercase().contains("claude") {
+                    let mut p = entry.path();
+                    p.push("LocalCache");
+                    p.push("Local");
+                    p.push("usage-widget");
+                    p.push("claude-usage-cache.json");
+                    paths.push(p);
+                }
+            }
+        }
+    }
+
+    paths
+}
+
 fn read_disk_cache() -> Option<DiskCache> {
-    let path = disk_cache_path()?;
-    let s = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&s).ok()
+    let mut paths = Vec::new();
+    if let Some(path) = disk_cache_path() {
+        paths.push(path);
+    }
+    paths.extend(legacy_disk_cache_paths());
+
+    for path in paths {
+        let s = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        if let Ok(cache) = serde_json::from_str::<DiskCache>(&s) {
+            return Some(cache);
+        }
+    }
+    None
 }
 
 fn write_disk_cache(value: &ClaudeLiveLimits) {
