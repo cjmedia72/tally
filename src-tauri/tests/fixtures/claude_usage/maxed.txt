@@ -1,0 +1,18 @@
+Plan usage limits  Max (5x)
+
+Current session
+Resets in 8 min
+100% used
+
+Weekly limits
+
+All models
+Resets in 4 hr 18 min
+44% used
+
+Sonnet only
+Resets in 4 hr 18 min
+0% used
+
+Claude Design
+You haven't used Claude Design yet

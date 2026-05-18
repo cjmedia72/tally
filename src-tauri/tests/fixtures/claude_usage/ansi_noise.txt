@@ -1,0 +1,20 @@
+settings:
+  model: claude-opus-4-1
+  stale line: 99% used
+
+[2J[HPlan usage limits
+
+| model | usage |
+| opus | 87% used |
+
+Current session
+Resets in less than a minute
+12% used
+
+Current week: All models
+Resets in 3 hr 10 min
+31% used
+
+Current week: Sonnet only
+Resets in 3 hr 10 min
+5% used

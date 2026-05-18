@@ -1,0 +1,13 @@
+Plan usage limits  Max (5x)
+
+Current session
+Resets in 2 hr 5 min
+82% remaining
+
+Current week: All models
+Resets in 1 day
+91% available
+
+Current week: Sonnet only
+Resets in 1 day
+98% left

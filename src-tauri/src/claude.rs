@@ -1,15 +1,16 @@
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Datelike, Duration, Local, TimeZone, Utc};
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-use regex::Regex;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::sync::mpsc;
+use std::io::{BufRead, BufReader};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 use walkdir::WalkDir;
+
+mod cli;
+
+use cli::fetch_cli_usage_limits;
 
 // Minimum cache TTL — hard floor so the API isn't hammered. Anthropic
 // rate-limits /api/oauth/usage aggressively (we've measured 429s at ~30
@@ -21,8 +22,6 @@ const DISK_CACHE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(2
 // On 429, refuse to retry for this long. The endpoint's window is opaque so
 // we just back off hard regardless of user refresh setting.
 const RATE_LIMIT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(900);
-const CLAUDE_CLI_USAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(18);
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct DiskCache {
     fetched_at_unix: i64,
@@ -146,258 +145,6 @@ fn write_disk_cache(value: &ClaudeLiveLimits) {
     }
 }
 
-fn fetch_cli_usage_limits() -> Result<ClaudeLiveLimits> {
-    let pty_system = native_pty_system();
-    let pair = pty_system.openpty(PtySize {
-        rows: 42,
-        cols: 140,
-        pixel_width: 0,
-        pixel_height: 0,
-    })?;
-
-    #[cfg(windows)]
-    let mut cmd = {
-        let mut c = CommandBuilder::new("cmd.exe");
-        c.args(["/C", "claude"]);
-        c
-    };
-
-    #[cfg(not(windows))]
-    let mut cmd = CommandBuilder::new("claude");
-
-    if let Ok(cwd) = std::env::current_dir() {
-        cmd.cwd(cwd);
-    }
-
-    let mut child = pair.slave.spawn_command(cmd)?;
-    drop(pair.slave);
-
-    let mut writer = pair.master.take_writer()?;
-    let mut reader = pair.master.try_clone_reader()?;
-    let (tx, rx) = mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        let mut buf = [0_u8; 4096];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if tx.send(String::from_utf8_lossy(&buf[..n]).to_string()).is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    });
-
-    std::thread::sleep(std::time::Duration::from_millis(900));
-    writer.write_all(b"/usage\r")?;
-    writer.flush()?;
-
-    let started = Instant::now();
-    let mut output = String::new();
-    let mut first_relevant_at: Option<Instant> = None;
-    while started.elapsed() < CLAUDE_CLI_USAGE_TIMEOUT {
-        while let Ok(chunk) = rx.try_recv() {
-            output.push_str(&chunk);
-        }
-        if usage_output_ready(&output) {
-            first_relevant_at.get_or_insert_with(Instant::now);
-            if first_relevant_at
-                .map(|t| t.elapsed() >= std::time::Duration::from_millis(1400))
-                .unwrap_or(false)
-            {
-                break;
-            }
-        }
-        std::thread::sleep(std::time::Duration::from_millis(150));
-    }
-
-    let _ = writer.write_all(b"\x03");
-    let _ = writer.flush();
-    let _ = child.kill();
-    while let Ok(chunk) = rx.try_recv() {
-        output.push_str(&chunk);
-    }
-
-    parse_cli_usage_limits(&output)
-}
-
-fn usage_output_ready(text: &str) -> bool {
-    let clean = strip_ansi(text);
-    let normalized: String = clean
-        .to_lowercase()
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .collect();
-    (normalized.contains("currentsession") || normalized.contains("currentweek"))
-        && clean.contains('%')
-        && (clean.to_lowercase().contains("used")
-            || clean.to_lowercase().contains("left")
-            || clean.to_lowercase().contains("remaining")
-            || clean.to_lowercase().contains("available"))
-        && !normalized.contains("loadingusage")
-}
-
-fn parse_cli_usage_limits(raw: &str) -> Result<ClaudeLiveLimits> {
-    let clean = strip_ansi(raw);
-    let panel = trim_to_latest_usage_panel(&clean).unwrap_or(clean.as_str());
-    let lines: Vec<&str> = panel.lines().collect();
-    let normalized: Vec<String> = lines.iter().map(|l| normalize_label(l)).collect();
-
-    let session = extract_percent_after("currentsession", &lines, &normalized);
-    let weekly = extract_percent_after("currentweekallmodels", &lines, &normalized)
-        .or_else(|| extract_percent_after("weeklylimits", &lines, &normalized));
-    let sonnet = extract_percent_after("currentweeksonnetonly", &lines, &normalized)
-        .or_else(|| extract_percent_after("currentweeksonnet", &lines, &normalized))
-        .or_else(|| extract_percent_after("sonnetonly", &lines, &normalized));
-
-    let session = session.ok_or_else(|| anyhow!("Claude CLI /usage parse failed: missing Current session"))?;
-    let session_reset = extract_reset_after("currentsession", &lines, &normalized);
-    let weekly_reset = extract_reset_after("currentweekallmodels", &lines, &normalized)
-        .or_else(|| extract_reset_after("weeklylimits", &lines, &normalized));
-    let sonnet_reset = extract_reset_after("currentweeksonnetonly", &lines, &normalized)
-        .or_else(|| extract_reset_after("currentweeksonnet", &lines, &normalized))
-        .or_else(|| extract_reset_after("sonnetonly", &lines, &normalized));
-
-    let mut sub_quotas = Vec::new();
-    if let Some(sonnet_percent) = sonnet {
-        sub_quotas.push(SubQuota {
-            label: "Sonnet only".to_string(),
-            utilization: sonnet_percent,
-            resets_at: sonnet_reset,
-        });
-    }
-
-    Ok(ClaudeLiveLimits {
-        five_hour_percent: session,
-        five_hour_resets_at: session_reset,
-        weekly_percent: weekly.unwrap_or(0.0),
-        weekly_resets_at: weekly_reset,
-        sub_quotas,
-        extra_usage: None,
-    })
-}
-
-fn strip_ansi(text: &str) -> String {
-    static ANSI: OnceLock<Regex> = OnceLock::new();
-    ANSI.get_or_init(|| Regex::new(r"\x1b\[[0-9;?]*[ -/]*[@-~]").unwrap())
-        .replace_all(text, "")
-        .to_string()
-}
-
-fn trim_to_latest_usage_panel(text: &str) -> Option<&str> {
-    let lower = text.to_lowercase();
-    if let Some(idx) = lower.rfind("plan usage limits") {
-        return Some(&text[idx..]);
-    }
-    if let Some(idx) = lower.rfind("current session") {
-        return Some(&text[idx..]);
-    }
-    if let Some(idx) = lower.rfind("usage limits") {
-        return Some(&text[idx..]);
-    }
-    None
-}
-
-fn normalize_label(text: &str) -> String {
-    text.to_lowercase()
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .collect()
-}
-
-fn extract_percent_after(label: &str, lines: &[&str], normalized: &[String]) -> Option<f64> {
-    for (idx, line) in normalized.iter().enumerate() {
-        if line.contains(label) {
-            for candidate in lines.iter().skip(idx).take(14) {
-                let candidate_norm = normalize_label(candidate);
-                if candidate_norm.starts_with("current") && !candidate_norm.contains(label) {
-                    break;
-                }
-                if let Some(pct) = percent_from_line(candidate) {
-                    return Some(pct);
-                }
-            }
-        }
-    }
-    None
-}
-
-fn percent_from_line(line: &str) -> Option<f64> {
-    let lower = line.to_lowercase();
-    if lower.contains('|')
-        && ["opus", "sonnet", "haiku", "default"]
-            .iter()
-            .any(|token| lower.contains(token))
-    {
-        return None;
-    }
-    static PCT: OnceLock<Regex> = OnceLock::new();
-    let re = PCT.get_or_init(|| Regex::new(r"([0-9]{1,3}(?:\.[0-9]+)?)\s*%").unwrap());
-    let caps = re.captures(line)?;
-    let raw = caps.get(1)?.as_str().parse::<f64>().ok()?.clamp(0.0, 100.0);
-    if ["used", "spent", "consumed"].iter().any(|token| lower.contains(token)) {
-        Some(raw)
-    } else if ["left", "remaining", "available"]
-        .iter()
-        .any(|token| lower.contains(token))
-    {
-        Some(100.0 - raw)
-    } else {
-        None
-    }
-}
-
-fn extract_reset_after(label: &str, lines: &[&str], normalized: &[String]) -> Option<DateTime<Utc>> {
-    for (idx, line) in normalized.iter().enumerate() {
-        if line.contains(label) {
-            for candidate in lines.iter().skip(idx).take(14) {
-                let candidate_norm = normalize_label(candidate);
-                if candidate_norm.starts_with("current") && !candidate_norm.contains(label) {
-                    break;
-                }
-                if let Some(reset) = reset_from_line(candidate) {
-                    return Some(reset);
-                }
-            }
-        }
-    }
-    None
-}
-
-fn reset_from_line(line: &str) -> Option<DateTime<Utc>> {
-    let lower = line.to_lowercase();
-    if !lower.contains("reset") {
-        return None;
-    }
-    let now = Utc::now();
-    if lower.contains("less than a minute") {
-        return Some(now + Duration::minutes(1));
-    }
-
-    static REL: OnceLock<Regex> = OnceLock::new();
-    let rel = REL.get_or_init(|| {
-        Regex::new(r"(?i)resets?\s+in\s+(?:(\d+)\s*h(?:r|our)?s?\s*)?(?:(\d+)\s*m(?:in(?:ute)?s?)?)?")
-            .unwrap()
-    });
-    if let Some(caps) = rel.captures(line) {
-        let hours = caps
-            .get(1)
-            .and_then(|m| m.as_str().parse::<i64>().ok())
-            .unwrap_or(0);
-        let mins = caps
-            .get(2)
-            .and_then(|m| m.as_str().parse::<i64>().ok())
-            .unwrap_or(0);
-        if hours > 0 || mins > 0 {
-            return Some(now + Duration::hours(hours) + Duration::minutes(mins));
-        }
-    }
-
-    None
-}
-
 // =====================================================================
 // LIVE Claude rate limits via /api/oauth/usage
 // Same endpoint claude.ai's dashboard and Claude Code CLI use internally.
@@ -454,7 +201,10 @@ struct ProfileOrg {
 /// Cached aggressively (24h) since it changes rarely.
 pub fn fetch_plan_tier() -> Result<String> {
     // Disk cache: ~/tally/claude-plan.json with 24h TTL
-    let cache_path = disk_cache_path().map(|mut p| { p.set_file_name("claude-plan.json"); p });
+    let cache_path = disk_cache_path().map(|mut p| {
+        p.set_file_name("claude-plan.json");
+        p
+    });
     if let Some(p) = &cache_path {
         if let Ok(s) = std::fs::read_to_string(p) {
             if let Ok(entry) = serde_json::from_str::<serde_json::Value>(&s) {
@@ -507,8 +257,8 @@ fn read_oauth_token() -> Result<String> {
     path.push(".claude");
     path.push(".credentials.json");
     let file = File::open(&path).map_err(|e| anyhow!("read {}: {e}", path.display()))?;
-    let creds: Credentials = serde_json::from_reader(file)
-        .map_err(|e| anyhow!("parse credentials: {e}"))?;
+    let creds: Credentials =
+        serde_json::from_reader(file).map_err(|e| anyhow!("parse credentials: {e}"))?;
     Ok(creds.claude_ai_oauth.access_token)
 }
 
@@ -625,7 +375,10 @@ fn http_fetch_live_limits() -> FetchOutcome {
     });
 
     let session_window = body.five_hour.as_ref().or(body.seven_day.as_ref());
-    let weekly_window = body.seven_day.as_ref().or(body.seven_day_oauth_apps.as_ref());
+    let weekly_window = body
+        .seven_day
+        .as_ref()
+        .or(body.seven_day_oauth_apps.as_ref());
 
     FetchOutcome::Ok(ClaudeLiveLimits {
         five_hour_percent: session_window.map(|w| w.utilization).unwrap_or(0.0),
@@ -662,8 +415,7 @@ fn claude_code_version() -> String {
 /// - 429 received: refuse to retry for 15 minutes (`RATE_LIMIT_BACKOFF`),
 ///   regardless of user setting — the server is telling us to back off.
 pub fn fetch_live_limits(refresh_ms: u64) -> Result<ClaudeLiveLimits> {
-    let ttl =
-        std::time::Duration::from_millis(refresh_ms).max(MIN_CACHE_TTL);
+    let ttl = std::time::Duration::from_millis(refresh_ms).max(MIN_CACHE_TTL);
     let now_inst = Instant::now();
     {
         let guard = cache().lock().unwrap();
@@ -684,8 +436,7 @@ pub fn fetch_live_limits(refresh_ms: u64) -> Result<ClaudeLiveLimits> {
         .unwrap_or_else(|e| {
             eprintln!("[tally] claude CLI /usage failed ({e}); falling back to OAuth usage");
             http_fetch_live_limits()
-        })
-    {
+        }) {
         FetchOutcome::Ok(fresh) => {
             let mut guard = cache().lock().unwrap();
             *guard = Some(CacheEntry {
@@ -780,7 +531,11 @@ fn claude_config_roots() -> Vec<std::path::PathBuf> {
                 if !name.contains("claude") {
                     continue;
                 }
-                let p = entry.path().join("LocalCache").join("Roaming").join("Claude");
+                let p = entry
+                    .path()
+                    .join("LocalCache")
+                    .join("Roaming")
+                    .join("Claude");
                 if seen.insert(p.clone()) {
                     roots.push(p);
                 }
@@ -913,10 +668,17 @@ pub fn collect(refresh_ms: u64) -> Result<ClaudeStats> {
     }
     for cw_root in cowork_session_roots() {
         // Find every nested .claude/projects/ subtree.
-        for entry in WalkDir::new(&cw_root).max_depth(10).into_iter().filter_map(|e| e.ok()) {
+        for entry in WalkDir::new(&cw_root)
+            .max_depth(10)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
             let p = entry.path();
-            if p.is_dir() && p.ends_with("projects")
-                && p.parent().map(|pp| pp.ends_with(".claude")).unwrap_or(false)
+            if p.is_dir()
+                && p.ends_with("projects")
+                && p.parent()
+                    .map(|pp| pp.ends_with(".claude"))
+                    .unwrap_or(false)
             {
                 walk_roots.push(p.to_path_buf());
             }
@@ -934,15 +696,13 @@ pub fn collect(refresh_ms: u64) -> Result<ClaudeStats> {
     // Rolling periods — exact-minute rollers from now
     let cutoff_30d = now - Duration::days(30);
     let cutoff_14d = now - Duration::days(14);
-    let cutoff_7d  = now - Duration::days(7);
-    let cutoff_1d  = now - Duration::days(1);
+    let cutoff_7d = now - Duration::days(7);
+    let cutoff_1d = now - Duration::days(1);
     // Calendar-anchored periods — use LOCAL time so "today" and "MTD" match
     // the user's wall clock, then convert to UTC for event comparison.
     let now_local = Local::now();
     let today_start = Local
-        .from_local_datetime(
-            &now_local.date_naive().and_hms_opt(0, 0, 0).unwrap(),
-        )
+        .from_local_datetime(&now_local.date_naive().and_hms_opt(0, 0, 0).unwrap())
         .single()
         .map(|dt| dt.with_timezone(&Utc))
         .unwrap_or(now);
@@ -957,7 +717,11 @@ pub fn collect(refresh_ms: u64) -> Result<ClaudeStats> {
         .map(|dt| dt.with_timezone(&Utc))
         .unwrap_or(now);
 
-    for entry in walk_roots.iter().flat_map(|r| WalkDir::new(r).into_iter()).filter_map(|e| e.ok()) {
+    for entry in walk_roots
+        .iter()
+        .flat_map(|r| WalkDir::new(r).into_iter())
+        .filter_map(|e| e.ok())
+    {
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
             continue;
@@ -965,7 +729,9 @@ pub fn collect(refresh_ms: u64) -> Result<ClaudeStats> {
         // Detect Cowork session by path containment OR by file-stem matching
         // a known cowork cliSessionId.
         let is_cowork_path = path.components().any(|c| {
-            c.as_os_str().to_string_lossy().contains("local-agent-mode-sessions")
+            c.as_os_str()
+                .to_string_lossy()
+                .contains("local-agent-mode-sessions")
         });
         let path_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         let is_cowork_session = is_cowork_path || cowork_ids.contains(path_stem);
@@ -1023,12 +789,24 @@ pub fn collect(refresh_ms: u64) -> Result<ClaudeStats> {
                 p.requests += 1;
                 p.cost += msg_cost;
             };
-            if ts >= today_start { accrue(&mut stats.today); }
-            if ts >= cutoff_1d   { accrue(&mut stats.d1); }
-            if ts >= cutoff_7d   { accrue(&mut stats.d7); }
-            if ts >= cutoff_14d  { accrue(&mut stats.d14); }
-            if ts >= cutoff_30d  { accrue(&mut stats.d30); }
-            if ts >= mtd_start   { accrue(&mut stats.mtd); }
+            if ts >= today_start {
+                accrue(&mut stats.today);
+            }
+            if ts >= cutoff_1d {
+                accrue(&mut stats.d1);
+            }
+            if ts >= cutoff_7d {
+                accrue(&mut stats.d7);
+            }
+            if ts >= cutoff_14d {
+                accrue(&mut stats.d14);
+            }
+            if ts >= cutoff_30d {
+                accrue(&mut stats.d30);
+            }
+            if ts >= mtd_start {
+                accrue(&mut stats.mtd);
+            }
 
             // Per-entrypoint $ over last 7 days (matches the API's weekly windows).
             if ts >= cutoff_7d {
@@ -1038,9 +816,15 @@ pub fn collect(refresh_ms: u64) -> Result<ClaudeStats> {
             // Cowork attribution: file lives under local-agent-mode-sessions
             // OR the event sessionId matches a known cliSessionId from the cowork index.
             if is_cowork_event {
-                if ts >= cutoff_7d   { stats.cowork_cost_7d += msg_cost; }
-                if ts >= today_start { stats.cowork_cost_today += msg_cost; }
-                if ts >= mtd_start   { stats.cowork_cost_mtd += msg_cost; }
+                if ts >= cutoff_7d {
+                    stats.cowork_cost_7d += msg_cost;
+                }
+                if ts >= today_start {
+                    stats.cowork_cost_today += msg_cost;
+                }
+                if ts >= mtd_start {
+                    stats.cowork_cost_mtd += msg_cost;
+                }
             }
         }
     }

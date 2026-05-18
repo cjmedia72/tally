@@ -244,8 +244,7 @@ body.theme-light .pill-meta {
 body.theme-light .expand-icon {
   color: rgba(31, 41, 55, 0.58);
 }
-body.theme-light .bar-wrap,
-body.theme-light .sub-quota .sq-bar {
+body.theme-light .bar-wrap {
   background: rgba(15, 23, 42, 0.12);
 }
 body.theme-light .weekly-tick {
@@ -263,8 +262,7 @@ body.theme-light .weekly-tick {
   body.theme-auto .expand-icon {
     color: rgba(31, 41, 55, 0.58);
   }
-  body.theme-auto .bar-wrap,
-  body.theme-auto .sub-quota .sq-bar {
+  body.theme-auto .bar-wrap {
     background: rgba(15, 23, 42, 0.12);
   }
   body.theme-auto .weekly-tick {
@@ -446,49 +444,6 @@ body.theme-light .card h4 .tier {
   margin: -4px 0 6px 0;
 }
 
-/* Sub-quotas (Sonnet / Opus / Cowork / Claude Design / Extra usage) */
-.sub-quotas {
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid var(--separator);
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.sub-quotas:empty { display: none; }
-.sub-quota {
-  display: grid;
-  grid-template-columns: 70px 1fr auto;
-  align-items: center;
-  gap: 8px;
-  font-size: 10px;
-}
-.sub-quota .sq-label {
-  color: var(--muted-fg);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  font-weight: 600;
-}
-.sub-quota .sq-bar {
-  height: 3px;
-  background: rgba(255,255,255,0.06);
-  border-radius: 2px;
-  overflow: hidden;
-}
-.sub-quota .sq-bar > div {
-  height: 100%;
-  background: var(--claude);
-  border-radius: 2px;
-}
-.sub-quota .sq-val {
-  font-size: 10px;
-  font-variant-numeric: tabular-nums;
-  color: var(--foreground);
-  min-width: 32px;
-  text-align: right;
-}
-.sub-quota.cowork .sq-bar > div { background: #5B9BD5; }
-.sub-quota.extra  .sq-bar > div { background: var(--warn); }
 .freshness.fresh { color: var(--ok); }
 .freshness.stale { color: var(--warn); }
 .freshness.cold  { color: var(--dim); }
@@ -636,14 +591,6 @@ body.theme-light .roi::before {
   background: var(--input-bg);
   border-color: var(--input-border);
 }
-.dv-divider {
-  display: inline-block;
-  width: 1px;
-  height: 14px;
-  background: var(--separator);
-  margin: 0 6px;
-}
-
 /* ───── SETTINGS panel ───── */
 .settings {
   width: 100vw;
