@@ -1,4 +1,5 @@
 use tauri::{
+    image::Image,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, LogicalSize, Manager, WebviewWindow, WindowEvent,
@@ -6,12 +7,14 @@ use tauri::{
 
 mod claude;
 mod codex;
+mod history;
 mod plans;
 mod pricing;
 mod snapshot;
 
 const COLLAPSED: (f64, f64) = (272.0, 122.0);
 const EXPANDED: (f64, f64) = (640.0, 510.0);
+const APP_ICON_PNG: &[u8] = include_bytes!("../icons/icon.png");
 
 /// Returns a fresh usage snapshot. `refresh_ms` is the user's UI refresh
 /// interval — the backend cache TTL is tied to this so each UI poll gets
@@ -19,7 +22,11 @@ const EXPANDED: (f64, f64) = (640.0, 510.0);
 /// picks an extreme value.
 #[tauri::command]
 fn get_snapshot(refresh_ms: Option<u64>) -> Result<snapshot::UsageSnapshot, String> {
-    snapshot::build(refresh_ms.unwrap_or(120_000)).map_err(|e| e.to_string())
+    let snap = snapshot::build(refresh_ms.unwrap_or(120_000)).map_err(|e| e.to_string())?;
+    if let Err(e) = history::record_snapshot(&snap) {
+        eprintln!("[tally] usage history write failed: {e}");
+    }
+    Ok(snap)
 }
 
 #[tauri::command]
@@ -87,6 +94,9 @@ pub fn run() {
         ])
         .setup(|app| {
             let window = app.get_webview_window("main").expect("main window missing");
+            if let Ok(icon) = Image::from_bytes(APP_ICON_PNG) {
+                let _ = window.set_icon(icon);
+            }
 
             // Force frameless + correct size at runtime (config alone is sometimes ignored on Win11).
             let _ = window.set_decorations(false);
