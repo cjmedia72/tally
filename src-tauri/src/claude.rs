@@ -245,19 +245,12 @@ fn parse_cli_usage_limits(raw: &str) -> Result<ClaudeLiveLimits> {
     let lines: Vec<&str> = panel.lines().collect();
     let normalized: Vec<String> = lines.iter().map(|l| normalize_label(l)).collect();
 
-    let mut session = extract_percent_after("currentsession", &lines, &normalized);
+    let session = extract_percent_after("currentsession", &lines, &normalized);
     let weekly = extract_percent_after("currentweekallmodels", &lines, &normalized)
         .or_else(|| extract_percent_after("weeklylimits", &lines, &normalized));
     let sonnet = extract_percent_after("currentweeksonnetonly", &lines, &normalized)
         .or_else(|| extract_percent_after("currentweeksonnet", &lines, &normalized))
         .or_else(|| extract_percent_after("sonnetonly", &lines, &normalized));
-
-    if session.is_none() {
-        let ordered = all_usage_percents(panel);
-        if let Some(pct) = ordered.first() {
-            session = Some(*pct);
-        }
-    }
 
     let session = session.ok_or_else(|| anyhow!("Claude CLI /usage parse failed: missing Current session"))?;
     let session_reset = extract_reset_after("currentsession", &lines, &normalized);
@@ -295,14 +288,14 @@ fn strip_ansi(text: &str) -> String {
 
 fn trim_to_latest_usage_panel(text: &str) -> Option<&str> {
     let lower = text.to_lowercase();
-    if let Some(idx) = lower.rfind("settings:") {
-        let tail = &text[idx..];
-        let lower_tail = tail.to_lowercase();
-        if lower_tail.contains("usage")
-            && (lower_tail.contains('%') || lower_tail.contains("loading usage"))
-        {
-            return Some(tail);
-        }
+    if let Some(idx) = lower.rfind("plan usage limits") {
+        return Some(&text[idx..]);
+    }
+    if let Some(idx) = lower.rfind("current session") {
+        return Some(&text[idx..]);
+    }
+    if let Some(idx) = lower.rfind("usage limits") {
+        return Some(&text[idx..]);
     }
     None
 }
@@ -329,10 +322,6 @@ fn extract_percent_after(label: &str, lines: &[&str], normalized: &[String]) -> 
         }
     }
     None
-}
-
-fn all_usage_percents(text: &str) -> Vec<f64> {
-    text.lines().filter_map(percent_from_line).collect()
 }
 
 fn percent_from_line(line: &str) -> Option<f64> {
