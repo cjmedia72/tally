@@ -143,7 +143,13 @@ pub fn fetch_live_limits(refresh_ms: u64) -> Result<ClaudeLiveLimits> {
     {
         let guard = cache().lock().unwrap();
         if let Some(entry) = guard.as_ref() {
-            if should_serve_cached(now_inst, entry.fetched_at, entry.cooldown_until, ttl) {
+            if should_serve_cached(
+                now_inst,
+                entry.fetched_at,
+                entry.value.fetched_at,
+                entry.cooldown_until,
+                ttl,
+            ) {
                 return Ok(entry.value.clone());
             }
         }
@@ -155,7 +161,8 @@ pub fn fetch_live_limits(refresh_ms: u64) -> Result<ClaudeLiveLimits> {
             .and_then(|entry| entry.cooldown_until)
             .filter(|until| now_inst < *until)
     };
-    let should_skip_oauth = active_cooldown.is_some();
+    let should_skip_oauth =
+        active_cooldown.is_some() || std::env::var_os("TALLY_CLAUDE_SKIP_OAUTH").is_some();
     let mut cooldown_after_success = active_cooldown;
 
     let outcome = if should_skip_oauth {
@@ -170,7 +177,35 @@ pub fn fetch_live_limits(refresh_ms: u64) -> Result<ClaudeLiveLimits> {
             })
     } else {
         match http_fetch_live_limits() {
-            FetchOutcome::Ok(fresh) => FetchOutcome::Ok(fresh),
+            FetchOutcome::Ok(fresh) => {
+                if active_window_needs_secondary_probe(&fresh) {
+                    eprintln!(
+                        "[tally] claude OAuth active window is stale/missing; probing CLI/Web for current session"
+                    );
+                    match fetch_cli_usage_limits() {
+                        Ok(cli) => FetchOutcome::Ok(merge_active_window(fresh, cli)),
+                        Err(cli_err) => match web_fetch_live_limits() {
+                            FetchOutcome::Ok(web) => {
+                                FetchOutcome::Ok(merge_active_window(fresh, web))
+                            }
+                            FetchOutcome::RateLimited(msg) => {
+                                eprintln!(
+                                    "[tally] claude secondary active-window probe hit rate limit ({msg}); keeping OAuth"
+                                );
+                                FetchOutcome::Ok(fresh)
+                            }
+                            FetchOutcome::Other(web_err) => {
+                                eprintln!(
+                                    "[tally] claude secondary active-window probe failed (CLI: {cli_err}; Web: {web_err}); keeping OAuth"
+                                );
+                                FetchOutcome::Ok(fresh)
+                            }
+                        },
+                    }
+                } else {
+                    FetchOutcome::Ok(fresh)
+                }
+            }
             FetchOutcome::RateLimited(msg) => {
                 eprintln!("[tally] {msg}; trying Claude CLI fallback");
                 cooldown_after_success = Some(Instant::now() + RATE_LIMIT_BACKOFF);
@@ -251,14 +286,51 @@ pub fn fetch_live_limits(refresh_ms: u64) -> Result<ClaudeLiveLimits> {
 fn should_serve_cached(
     now: Instant,
     fetched_at: Instant,
+    fetched_at_wall: chrono::DateTime<Utc>,
     cooldown_until: Option<Instant>,
     ttl: std::time::Duration,
 ) -> bool {
     let fresh_enough = now.duration_since(fetched_at) < ttl;
-    match cooldown_until {
-        Some(until) if now < until => fresh_enough,
-        _ => fresh_enough,
+    let wall_fresh_enough = Utc::now()
+        .signed_duration_since(fetched_at_wall)
+        .to_std()
+        .map(|age| age < ttl)
+        .unwrap_or(false);
+    if !fresh_enough || !wall_fresh_enough {
+        return false;
     }
+    match cooldown_until {
+        Some(until) if now < until => true,
+        _ => true,
+    }
+}
+
+fn active_window_needs_secondary_probe(value: &ClaudeLiveLimits) -> bool {
+    if value.weekly_percent <= 0.0 {
+        return false;
+    }
+
+    match value.five_hour_resets_at {
+        Some(reset) => reset <= Utc::now(),
+        None => value.five_hour_percent <= 0.0,
+    }
+}
+
+fn merge_active_window(mut base: ClaudeLiveLimits, active: ClaudeLiveLimits) -> ClaudeLiveLimits {
+    base.source = active.source;
+    base.fetched_at = active.fetched_at;
+    base.five_hour_percent = active.five_hour_percent;
+    base.five_hour_resets_at = active.five_hour_resets_at;
+
+    if active.weekly_percent > 0.0 {
+        base.weekly_percent = active.weekly_percent;
+        base.weekly_resets_at = active.weekly_resets_at;
+    }
+    if !active.sub_quotas.is_empty() {
+        base.sub_quotas = active.sub_quotas;
+    }
+
+    base
 }
 
 #[cfg(test)]
@@ -286,7 +358,13 @@ mod tests {
         let fetched_at = now - std::time::Duration::from_secs(90);
         let cooldown_until = Some(now + std::time::Duration::from_secs(600));
 
-        assert!(!should_serve_cached(now, fetched_at, cooldown_until, ttl));
+        assert!(!should_serve_cached(
+            now,
+            fetched_at,
+            Utc::now() - chrono::Duration::seconds(90),
+            cooldown_until,
+            ttl
+        ));
     }
 
     #[test]
@@ -296,7 +374,45 @@ mod tests {
         let fetched_at = now - std::time::Duration::from_secs(30);
         let cooldown_until = Some(now + std::time::Duration::from_secs(600));
 
-        assert!(should_serve_cached(now, fetched_at, cooldown_until, ttl));
+        assert!(should_serve_cached(
+            now,
+            fetched_at,
+            Utc::now() - chrono::Duration::seconds(30),
+            cooldown_until,
+            ttl
+        ));
+    }
+
+    #[test]
+    fn wall_clock_stale_cache_is_not_served_after_sleep() {
+        let now = Instant::now();
+        let ttl = std::time::Duration::from_secs(60);
+        let fetched_at = now - std::time::Duration::from_secs(10);
+        let wall_fetched_at = Utc::now() - chrono::Duration::hours(11);
+
+        assert!(!should_serve_cached(
+            now,
+            fetched_at,
+            wall_fetched_at,
+            None,
+            ttl
+        ));
+    }
+
+    #[test]
+    fn stale_oauth_active_window_requests_secondary_probe() {
+        let value = ClaudeLiveLimits {
+            source: ClaudeLimitSource::Oauth,
+            fetched_at: Utc::now(),
+            five_hour_percent: 30.0,
+            five_hour_resets_at: Some(Utc::now() - chrono::Duration::minutes(5)),
+            weekly_percent: 35.0,
+            weekly_resets_at: Some(Utc::now() + chrono::Duration::days(3)),
+            sub_quotas: Vec::new(),
+            extra_usage: None,
+        };
+
+        assert!(active_window_needs_secondary_probe(&value));
     }
 
     #[test]

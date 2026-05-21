@@ -5,11 +5,23 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use regex::Regex;
 use std::io::{Read, Write};
 use std::sync::{mpsc, OnceLock};
-use std::time::Instant;
+use std::time::{Duration as StdDuration, Instant};
 
-const CLAUDE_CLI_USAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(18);
+const CLAUDE_CLI_USAGE_TIMEOUT: StdDuration = StdDuration::from_secs(24);
+const CLAUDE_CLI_USAGE_RETRY_TIMEOUT: StdDuration = StdDuration::from_secs(60);
 
 pub(super) fn fetch_cli_usage_limits() -> Result<ClaudeLiveLimits> {
+    match fetch_cli_usage_limits_once(CLAUDE_CLI_USAGE_TIMEOUT) {
+        Ok(limits) => Ok(limits),
+        Err(err) if should_retry_cli_probe(&err) => {
+            eprintln!("[tally] Claude CLI /usage retrying with extended timeout ({err})");
+            fetch_cli_usage_limits_once(CLAUDE_CLI_USAGE_RETRY_TIMEOUT)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn fetch_cli_usage_limits_once(timeout: StdDuration) -> Result<ClaudeLiveLimits> {
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(PtySize {
         rows: 42,
@@ -26,11 +38,20 @@ pub(super) fn fetch_cli_usage_limits() -> Result<ClaudeLiveLimits> {
     };
 
     #[cfg(not(windows))]
-    let mut cmd = CommandBuilder::new("claude");
+    let mut cmd = {
+        let mut c = CommandBuilder::new("claude");
+        c.args(["--allowed-tools", ""]);
+        c
+    };
 
-    if let Ok(cwd) = std::env::current_dir() {
-        cmd.cwd(cwd);
+    if let Some(home) = dirs::home_dir() {
+        cmd.cwd(home);
     }
+    cmd.env_remove("ANTHROPIC_API_KEY");
+    cmd.env_remove("ANTHROPIC_AUTH_TOKEN");
+    cmd.env_remove("ANTHROPIC_BASE_URL");
+    cmd.env_remove("ANTHROPIC_MODEL");
+    cmd.env_remove("ANTHROPIC_SMALL_FAST_MODEL");
 
     let mut child = pair.slave.spawn_command(cmd)?;
     drop(pair.slave);
@@ -56,27 +77,43 @@ pub(super) fn fetch_cli_usage_limits() -> Result<ClaudeLiveLimits> {
         }
     });
 
-    std::thread::sleep(std::time::Duration::from_millis(900));
+    std::thread::sleep(StdDuration::from_millis(2200));
+    while rx.try_recv().is_ok() {}
     writer.write_all(b"/usage\r")?;
     writer.flush()?;
 
     let started = Instant::now();
     let mut output = String::new();
     let mut first_relevant_at: Option<Instant> = None;
-    while started.elapsed() < CLAUDE_CLI_USAGE_TIMEOUT {
+    let mut last_enter_at = Instant::now();
+    while started.elapsed() < timeout {
         while let Ok(chunk) = rx.try_recv() {
             output.push_str(&chunk);
+        }
+        let lower = output.to_lowercase();
+        let normalized = lower
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect::<String>();
+        if normalized.contains("showplanusagelimits") || normalized.contains("showplan") {
+            let _ = writer.write_all(b"\r");
+            let _ = writer.flush();
+        }
+        if last_enter_at.elapsed() >= StdDuration::from_millis(800) {
+            let _ = writer.write_all(b"\r");
+            let _ = writer.flush();
+            last_enter_at = Instant::now();
         }
         if usage_output_ready(&output) {
             first_relevant_at.get_or_insert_with(Instant::now);
             if first_relevant_at
-                .map(|t| t.elapsed() >= std::time::Duration::from_millis(1400))
+                .map(|t| t.elapsed() >= StdDuration::from_millis(2000))
                 .unwrap_or(false)
             {
                 break;
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(150));
+        std::thread::sleep(StdDuration::from_millis(150));
     }
 
     let _ = writer.write_all(b"\x03");
@@ -86,7 +123,29 @@ pub(super) fn fetch_cli_usage_limits() -> Result<ClaudeLiveLimits> {
         output.push_str(&chunk);
     }
 
-    parse_cli_usage_limits(&output)
+    parse_cli_usage_limits(&output).map_err(|err| {
+        if std::env::var_os("TALLY_CLAUDE_DEBUG_CLI_OUTPUT").is_some() {
+            let clean = strip_ansi(&output);
+            let tail = clean
+                .chars()
+                .rev()
+                .take(1800)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect::<String>();
+            eprintln!("[tally] Claude CLI /usage raw tail:\n{tail}");
+        }
+        err
+    })
+}
+
+fn should_retry_cli_probe(err: &anyhow::Error) -> bool {
+    let message = err.to_string().to_lowercase();
+    message.contains("timed out")
+        || message.contains("no output")
+        || message.contains("still loading usage")
+        || message.contains("startup output")
 }
 
 pub(crate) fn claude_cli_available() -> bool {
@@ -104,17 +163,25 @@ fn usage_output_ready(text: &str) -> bool {
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
         .collect();
-    (normalized.contains("currentsession") || normalized.contains("currentweek"))
-        && clean.contains('%')
-        && (clean.to_lowercase().contains("used")
-            || clean.to_lowercase().contains("left")
-            || clean.to_lowercase().contains("remaining")
-            || clean.to_lowercase().contains("available"))
-        && !normalized.contains("loadingusage")
+    (usage_capture_has_session_value(&normalized) && clean.contains('%'))
+        || (usage_output_looks_relevant(&clean)
+            && clean.to_lowercase().contains("failed to load usage data"))
 }
 
 fn parse_cli_usage_limits(raw: &str) -> Result<ClaudeLiveLimits> {
     let clean = strip_ansi(raw);
+    if clean.trim().is_empty() {
+        return Err(anyhow!("Claude CLI /usage probe timed out with no output"));
+    }
+    if is_usage_still_loading(&clean) {
+        return Err(anyhow!("Claude CLI /usage is still loading usage data"));
+    }
+    if normalize_label(&clean).contains("failedtoloadusagedata") {
+        return Err(anyhow!("Claude CLI could not load usage data"));
+    }
+    if !usage_output_looks_relevant(&clean) {
+        return Err(anyhow!("Claude CLI /usage looked like startup output"));
+    }
     let panel = trim_to_latest_usage_panel(&clean).unwrap_or(clean.as_str());
     let lines: Vec<&str> = panel.lines().collect();
     let normalized: Vec<String> = lines.iter().map(|l| normalize_label(l)).collect();
@@ -165,6 +232,19 @@ fn strip_ansi(text: &str) -> String {
 
 fn trim_to_latest_usage_panel(text: &str) -> Option<&str> {
     let lower = text.to_lowercase();
+    if let Some(idx) = lower.rfind("settings:") {
+        let tail = &text[idx..];
+        let tail_lower = tail.to_lowercase();
+        if tail_lower.contains("usage")
+            && (tail.contains('%')
+                || tail_lower.contains("loading usage")
+                || tail_lower.contains("loadingusage")
+                || tail_lower.contains("current session")
+                || tail_lower.contains("current week"))
+        {
+            return Some(tail);
+        }
+    }
     if let Some(idx) = lower.rfind("plan usage limits") {
         return Some(&text[idx..]);
     }
@@ -175,6 +255,59 @@ fn trim_to_latest_usage_panel(text: &str) -> Option<&str> {
         return Some(&text[idx..]);
     }
     None
+}
+
+fn usage_output_looks_relevant(text: &str) -> bool {
+    let normalized: String = text
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    normalized.contains("currentsession")
+        || normalized.contains("currentweek")
+        || normalized.contains("loadingusage")
+        || normalized.contains("failedtoloadusagedata")
+}
+
+fn is_usage_still_loading(text: &str) -> bool {
+    let normalized: String = strip_ansi(text)
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    normalized.contains("loadingusage")
+        && !usage_capture_has_session_value(&normalized)
+        && all_usage_percents(text).is_empty()
+}
+
+fn usage_capture_has_session_value(normalized: &str) -> bool {
+    normalized.contains("currentsession")
+        && (normalized.contains("used")
+            || normalized.contains("left")
+            || normalized.contains("remaining")
+            || normalized.contains("available"))
+}
+
+fn all_usage_percents(text: &str) -> Vec<f64> {
+    let normalized: String = strip_ansi(text)
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    let has_usage_windows =
+        normalized.contains("currentsession") || normalized.contains("currentweek");
+    let loading_only = normalized.contains("loadingusage") && !has_usage_windows;
+    let has_usage_keywords = normalized.contains("used")
+        || normalized.contains("left")
+        || normalized.contains("remaining")
+        || normalized.contains("available");
+    if loading_only || !has_usage_keywords {
+        return Vec::new();
+    }
+    strip_ansi(text)
+        .lines()
+        .filter_map(percent_from_line)
+        .collect()
 }
 
 fn normalize_label(text: &str) -> String {
@@ -398,7 +531,43 @@ mod tests {
         .unwrap_err()
         .to_string();
 
-        assert!(err.contains("missing Current session"));
+        assert!(err.contains("still loading usage"));
+    }
+
+    #[test]
+    fn trims_to_latest_settings_usage_panel() {
+        let limits = parse_cli_usage_limits(include_str!(
+            "../../tests/fixtures/claude_usage/settings_panel_with_status_noise.txt"
+        ))
+        .unwrap();
+
+        assert_eq!(limits.five_hour_percent, 12.0);
+        assert_eq!(limits.weekly_percent, 22.0);
+        assert_eq!(limits.sub_quotas[0].utilization, 0.0);
+    }
+
+    #[test]
+    fn rejects_startup_output_as_retryable() {
+        let err = parse_cli_usage_limits(include_str!(
+            "../../tests/fixtures/claude_usage/startup_output.txt"
+        ))
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("startup output"));
+        assert!(should_retry_cli_probe(&anyhow!(err)));
+    }
+
+    #[test]
+    fn rejects_failed_to_load_usage_data_without_guessing() {
+        let err = parse_cli_usage_limits(include_str!(
+            "../../tests/fixtures/claude_usage/failed_to_load.txt"
+        ))
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("could not load usage data"));
+        assert!(!should_retry_cli_probe(&anyhow!(err)));
     }
 
     #[test]

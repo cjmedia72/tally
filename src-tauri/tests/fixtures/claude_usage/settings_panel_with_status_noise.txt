@@ -1,0 +1,17 @@
+Welcome to Claude Code
+│ opus | default | 0% context remaining │
+
+Settings: Profile default
+Usage
+
+Current session
+12% used
+Resets in 2 hr 58 min
+
+Current week (all models)
+22% used
+Resets Sun 8:00 PM
+
+Current week (Sonnet only)
+0% used
+You haven't used Sonnet yet

@@ -1,0 +1,6 @@
+Welcome to Claude Code!
+
+Tips for getting started:
+Run /help for help, /status for your account, or type your prompt.
+
+│ sonnet | default | 0% context remaining │
