@@ -376,12 +376,6 @@ body.single-agent .data-view {
   margin-left: auto;
   margin-right: auto;
 }
-body.single-agent .roi {
-  grid-template-columns: repeat(3, 1fr);
-}
-body.single-agent .roi-cell:nth-child(3) {
-  display: none;
-}
 /* Empty state when neither vendor is connected */
 .empty-state {
   background: var(--card-bg);
