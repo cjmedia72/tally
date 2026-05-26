@@ -10,9 +10,9 @@ use super::types::{ClaudeLimitSource, FetchOutcome};
 
 // Anthropic's public Claude Code OAuth client. Same id baked into the
 // Claude Code CLI and Claude Desktop. Used for the refresh-token grant
-// against Anthropic's console-side token endpoint.
+// against Anthropic's platform token endpoint.
 const CLAUDE_OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
-const CLAUDE_OAUTH_TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
+const CLAUDE_OAUTH_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 // Refresh proactively when within this many seconds of expiry so the next
 // HTTP call always carries a fresh token (no wasted 401 round-trip).
 const TOKEN_REFRESH_MARGIN_SECS: i64 = 60;
@@ -91,7 +91,10 @@ fn is_token_expired(block: &OauthBlock) -> bool {
 fn post_refresh(refresh_token: &str) -> Result<RefreshResponse> {
     let resp = ureq::post(CLAUDE_OAUTH_TOKEN_URL)
         .set("Content-Type", "application/json")
-        .set("User-Agent", &format!("claude-code/{}", claude_code_version()))
+        .set(
+            "User-Agent",
+            &format!("claude-code/{}", claude_code_version()),
+        )
         .timeout(std::time::Duration::from_secs(15))
         .send_json(serde_json::json!({
             "grant_type": "refresh_token",
@@ -240,4 +243,80 @@ fn claude_code_version() -> String {
         }
     }
     "2.1.0".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn uses_claude_code_platform_refresh_endpoint() {
+        assert_eq!(
+            CLAUDE_OAUTH_TOKEN_URL,
+            "https://platform.claude.com/v1/oauth/token"
+        );
+        assert_eq!(
+            CLAUDE_OAUTH_CLIENT_ID,
+            "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+        );
+    }
+
+    #[test]
+    fn parses_nested_claude_credentials_and_preserves_metadata() {
+        let raw = json!({
+            "claudeAiOauth": {
+                "accessToken": "access",
+                "refreshToken": "refresh",
+                "expiresAt": Utc::now().timestamp_millis() + 3_600_000,
+                "scopes": ["user:profile"],
+                "subscriptionType": "max",
+                "rateLimitTier": "default_claude_max_5x"
+            },
+            "mcpOAuth": {
+                "someServer": {
+                    "accessToken": "mcp"
+                }
+            }
+        });
+
+        let creds: CredentialsFile = serde_json::from_value(raw).unwrap();
+
+        assert_eq!(creds.claude_ai_oauth.access_token, "access");
+        assert_eq!(
+            creds.claude_ai_oauth.refresh_token.as_deref(),
+            Some("refresh")
+        );
+        assert_eq!(
+            creds
+                .claude_ai_oauth
+                .extra
+                .get("subscriptionType")
+                .and_then(|v| v.as_str()),
+            Some("max")
+        );
+        assert!(creds.other.contains_key("mcpOAuth"));
+    }
+
+    #[test]
+    fn treats_expiry_as_epoch_millis_with_refresh_margin() {
+        let fresh = OauthBlock {
+            access_token: "access".to_string(),
+            refresh_token: Some("refresh".to_string()),
+            expires_at: Some(Utc::now().timestamp_millis() + 3_600_000),
+            extra: serde_json::Map::new(),
+        };
+        let expired = OauthBlock {
+            expires_at: Some(Utc::now().timestamp_millis() - 1),
+            ..fresh.clone()
+        };
+        let inside_margin = OauthBlock {
+            expires_at: Some(Utc::now().timestamp_millis() + 30_000),
+            ..fresh.clone()
+        };
+
+        assert!(!is_token_expired(&fresh));
+        assert!(is_token_expired(&expired));
+        assert!(is_token_expired(&inside_margin));
+    }
 }
