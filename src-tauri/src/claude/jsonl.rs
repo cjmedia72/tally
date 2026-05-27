@@ -51,6 +51,26 @@ struct FileSignature {
     local_ordinal: u32,
 }
 
+impl FileSignature {
+    fn new(local_now: chrono::DateTime<Local>) -> Self {
+        Self {
+            files: 0,
+            bytes: 0,
+            newest_mtime_ns: 0,
+            local_year: local_now.year(),
+            local_ordinal: local_now.ordinal(),
+        }
+    }
+
+    fn observe_file(&mut self, len: u64, modified: std::time::SystemTime) {
+        if let Ok(delta) = modified.duration_since(std::time::UNIX_EPOCH) {
+            self.newest_mtime_ns = self.newest_mtime_ns.max(delta.as_nanos());
+        }
+        self.files += 1;
+        self.bytes = self.bytes.saturating_add(len);
+    }
+}
+
 fn stats_cache() -> &'static Mutex<Option<(FileSignature, ClaudeStats)>> {
     static CACHE: OnceLock<Mutex<Option<(FileSignature, ClaudeStats)>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(None))
@@ -117,13 +137,7 @@ pub(crate) fn collect_token_stats() -> Result<ClaudeStats> {
         .unwrap_or(now);
 
     let mut jsonl_files: Vec<(std::path::PathBuf, std::fs::Metadata)> = Vec::new();
-    let mut signature = FileSignature {
-        files: 0,
-        bytes: 0,
-        newest_mtime_ns: 0,
-        local_year: now_local.year(),
-        local_ordinal: now_local.ordinal(),
-    };
+    let mut signature = FileSignature::new(now_local);
 
     for entry in walk_roots
         .iter()
@@ -143,12 +157,10 @@ pub(crate) fn collect_token_stats() -> Result<ClaudeStats> {
             if mt < cutoff_30d {
                 continue;
             }
-            if let Ok(delta) = mtime.duration_since(std::time::UNIX_EPOCH) {
-                signature.newest_mtime_ns = signature.newest_mtime_ns.max(delta.as_nanos());
-            }
+            signature.observe_file(meta.len(), mtime);
+        } else {
+            signature.observe_file(meta.len(), std::time::UNIX_EPOCH);
         }
-        signature.files += 1;
-        signature.bytes = signature.bytes.saturating_add(meta.len());
         jsonl_files.push((path, meta));
     }
 
@@ -272,4 +284,54 @@ fn add(w: &mut TokenWindow, u: &ClaudeUsage) {
     w.output += u.output_tokens;
     w.cache_read += u.cache_read_input_tokens;
     w.cache_write += u.cache_creation_input_tokens;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn file_signature_changes_when_jsonl_tree_changes() {
+        let day = Local.with_ymd_and_hms(2026, 5, 27, 8, 0, 0).unwrap();
+        let mut a = FileSignature::new(day);
+        a.observe_file(
+            100,
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(10),
+        );
+
+        let mut same = FileSignature::new(day);
+        same.observe_file(
+            100,
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(10),
+        );
+        assert_eq!(a, same);
+
+        let mut size_changed = FileSignature::new(day);
+        size_changed.observe_file(
+            101,
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(10),
+        );
+        assert_ne!(a, size_changed);
+
+        let mut mtime_changed = FileSignature::new(day);
+        mtime_changed.observe_file(
+            100,
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(11),
+        );
+        assert_ne!(a, mtime_changed);
+    }
+
+    #[test]
+    fn file_signature_changes_on_local_day_rollover() {
+        let before_midnight = Local.with_ymd_and_hms(2026, 5, 27, 23, 59, 0).unwrap();
+        let after_midnight = Local.with_ymd_and_hms(2026, 5, 28, 0, 1, 0).unwrap();
+        let mut a = FileSignature::new(before_midnight);
+        let mut b = FileSignature::new(after_midnight);
+        let mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(10);
+        a.observe_file(100, mtime);
+        b.observe_file(100, mtime);
+
+        assert_ne!(a, b);
+    }
 }

@@ -551,6 +551,26 @@ struct FileSignature {
     local_ordinal: u32,
 }
 
+impl FileSignature {
+    fn new(local_now: chrono::DateTime<Local>) -> Self {
+        Self {
+            files: 0,
+            bytes: 0,
+            newest_mtime_ns: 0,
+            local_year: local_now.year(),
+            local_ordinal: local_now.ordinal(),
+        }
+    }
+
+    fn observe_file(&mut self, len: u64, modified: std::time::SystemTime) {
+        if let Ok(delta) = modified.duration_since(std::time::UNIX_EPOCH) {
+            self.newest_mtime_ns = self.newest_mtime_ns.max(delta.as_nanos());
+        }
+        self.files += 1;
+        self.bytes = self.bytes.saturating_add(len);
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 struct LocalTokenStats {
     today: CodexPeriodStats,
@@ -630,13 +650,7 @@ pub fn collect() -> Result<CodexStats> {
     }
 
     let mut jsonl_files: Vec<(PathBuf, std::fs::Metadata)> = Vec::new();
-    let mut signature = FileSignature {
-        files: 0,
-        bytes: 0,
-        newest_mtime_ns: 0,
-        local_year: now_local.year(),
-        local_ordinal: now_local.ordinal(),
-    };
+    let mut signature = FileSignature::new(now_local);
     for entry in roots
         .iter()
         .flat_map(|r| WalkDir::new(r).into_iter())
@@ -655,12 +669,10 @@ pub fn collect() -> Result<CodexStats> {
             if mt < cutoff_30d {
                 continue;
             }
-            if let Ok(delta) = mtime.duration_since(std::time::UNIX_EPOCH) {
-                signature.newest_mtime_ns = signature.newest_mtime_ns.max(delta.as_nanos());
-            }
+            signature.observe_file(meta.len(), mtime);
+        } else {
+            signature.observe_file(meta.len(), std::time::UNIX_EPOCH);
         }
-        signature.files += 1;
-        signature.bytes = signature.bytes.saturating_add(meta.len());
         jsonl_files.push((path, meta));
     }
 
@@ -794,4 +806,57 @@ fn apply_local_token_stats(stats: &mut CodexStats, local: &LocalTokenStats) {
     stats.d14 = local.d14.clone();
     stats.d30 = local.d30.clone();
     stats.mtd = local.mtd.clone();
+}
+
+#[cfg(test)]
+mod local_cache_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn file_signature_changes_on_file_or_day_changes() {
+        let day = Local.with_ymd_and_hms(2026, 5, 27, 8, 0, 0).unwrap();
+        let next_day = Local.with_ymd_and_hms(2026, 5, 28, 8, 0, 0).unwrap();
+        let mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(10);
+
+        let mut base = FileSignature::new(day);
+        base.observe_file(42, mtime);
+
+        let mut same = FileSignature::new(day);
+        same.observe_file(42, mtime);
+        assert_eq!(base, same);
+
+        let mut size_changed = FileSignature::new(day);
+        size_changed.observe_file(43, mtime);
+        assert_ne!(base, size_changed);
+
+        let mut day_changed = FileSignature::new(next_day);
+        day_changed.observe_file(42, mtime);
+        assert_ne!(base, day_changed);
+    }
+
+    #[test]
+    fn cached_local_token_stats_do_not_overwrite_live_limit_fields() {
+        let mut stats = CodexStats {
+            plan_label: "PRO 5x".to_string(),
+            plan_label_raw: "prolite".to_string(),
+            last_event_at: Some(Utc::now()),
+            ..Default::default()
+        };
+        stats.rate_limits.primary_used_percent = 12.0;
+        let local = LocalTokenStats {
+            today: CodexPeriodStats {
+                requests: 7,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        apply_local_token_stats(&mut stats, &local);
+
+        assert_eq!(stats.today.requests, 7);
+        assert_eq!(stats.rate_limits.primary_used_percent, 12.0);
+        assert_eq!(stats.plan_label_raw, "prolite");
+        assert!(stats.last_event_at.is_some());
+    }
 }

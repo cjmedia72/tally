@@ -330,4 +330,56 @@ mod tests {
         assert_eq!(usage.requests, 5);
         assert_eq!(usage.api_equiv, 12.50);
     }
+
+    #[test]
+    fn daily_upsert_reports_no_change_for_lower_or_equal_usage() {
+        let existing = DailyUsage {
+            tokens: DailyTokens {
+                input: 100,
+                output: 50,
+                cache_read: 20,
+                cache_write: 10,
+                cached_input: 30,
+                reasoning: 40,
+            },
+            requests: 5,
+            api_equiv: 12.50,
+        };
+        let incoming = DailyUsage {
+            tokens: DailyTokens {
+                input: 90,
+                output: 50,
+                cache_read: 20,
+                cache_write: 10,
+                cached_input: 30,
+                reasoning: 40,
+            },
+            requests: 5,
+            api_equiv: 12.50,
+        };
+        let mut slot = Some(existing.clone());
+
+        assert!(!upsert_vendor_day(&mut slot, &incoming));
+        assert_eq!(slot.unwrap().tokens.input, existing.tokens.input);
+    }
+
+    #[test]
+    fn daily_upsert_reports_change_for_growth_or_new_day() {
+        let incoming = DailyUsage {
+            requests: 1,
+            api_equiv: 1.0,
+            ..Default::default()
+        };
+        let mut empty = None;
+        assert!(upsert_vendor_day(&mut empty, &incoming));
+
+        let mut existing = Some(incoming.clone());
+        let larger = DailyUsage {
+            requests: 2,
+            api_equiv: 3.0,
+            ..Default::default()
+        };
+        assert!(upsert_vendor_day(&mut existing, &larger));
+        assert_eq!(existing.unwrap().requests, 2);
+    }
 }
