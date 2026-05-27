@@ -4,6 +4,7 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
+use std::sync::{Mutex, OnceLock};
 use walkdir::WalkDir;
 
 use super::roots::{cowork_session_roots, discover_cowork_session_ids};
@@ -39,6 +40,20 @@ struct ClaudeUsage {
     cache_creation_input_tokens: u64,
     #[serde(default)]
     cache_read_input_tokens: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileSignature {
+    files: u64,
+    bytes: u64,
+    newest_mtime_ns: u128,
+    local_year: i32,
+    local_ordinal: u32,
+}
+
+fn stats_cache() -> &'static Mutex<Option<(FileSignature, ClaudeStats)>> {
+    static CACHE: OnceLock<Mutex<Option<(FileSignature, ClaudeStats)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
 }
 
 pub(crate) fn collect_token_stats() -> Result<ClaudeStats> {
@@ -101,15 +116,49 @@ pub(crate) fn collect_token_stats() -> Result<ClaudeStats> {
         .map(|dt| dt.with_timezone(&Utc))
         .unwrap_or(now);
 
+    let mut jsonl_files: Vec<(std::path::PathBuf, std::fs::Metadata)> = Vec::new();
+    let mut signature = FileSignature {
+        files: 0,
+        bytes: 0,
+        newest_mtime_ns: 0,
+        local_year: now_local.year(),
+        local_ordinal: now_local.ordinal(),
+    };
+
     for entry in walk_roots
         .iter()
         .flat_map(|r| WalkDir::new(r).into_iter())
         .filter_map(|e| e.ok())
     {
-        let path = entry.path();
+        let path = entry.path().to_path_buf();
         if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
             continue;
         }
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if let Ok(mtime) = meta.modified() {
+            let mt: DateTime<Utc> = mtime.into();
+            if mt < cutoff_30d {
+                continue;
+            }
+            if let Ok(delta) = mtime.duration_since(std::time::UNIX_EPOCH) {
+                signature.newest_mtime_ns = signature.newest_mtime_ns.max(delta.as_nanos());
+            }
+        }
+        signature.files += 1;
+        signature.bytes = signature.bytes.saturating_add(meta.len());
+        jsonl_files.push((path, meta));
+    }
+
+    if let Some((cached_sig, cached_stats)) = stats_cache().lock().unwrap().as_ref() {
+        if *cached_sig == signature {
+            return Ok(cached_stats.clone());
+        }
+    }
+
+    for (path, _meta) in jsonl_files {
         let is_cowork_path = path.components().any(|c| {
             c.as_os_str()
                 .to_string_lossy()
@@ -117,14 +166,6 @@ pub(crate) fn collect_token_stats() -> Result<ClaudeStats> {
         });
         let path_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         let is_cowork_session = is_cowork_path || cowork_ids.contains(path_stem);
-        if let Ok(meta) = entry.metadata() {
-            if let Ok(mtime) = meta.modified() {
-                let mt: DateTime<Utc> = mtime.into();
-                if mt < cutoff_30d {
-                    continue;
-                }
-            }
-        }
         let file = match File::open(path) {
             Ok(f) => f,
             Err(_) => continue,
@@ -222,6 +263,7 @@ pub(crate) fn collect_token_stats() -> Result<ClaudeStats> {
         eprintln!("[tally] claude daily history backfill failed: {e}");
     }
 
+    *stats_cache().lock().unwrap() = Some((signature, stats.clone()));
     Ok(stats)
 }
 

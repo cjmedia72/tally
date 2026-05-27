@@ -36,8 +36,7 @@ struct ShellState {
 #[tauri::command]
 async fn get_snapshot(refresh_ms: Option<u64>) -> Result<snapshot::UsageSnapshot, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let snap = snapshot::build(refresh_ms.unwrap_or(120_000))
-            .map_err(|e| e.to_string())?;
+        let snap = snapshot::build(refresh_ms.unwrap_or(120_000)).map_err(|e| e.to_string())?;
         if let Err(e) = history::record_snapshot(&snap) {
             eprintln!("[tally] usage history write failed: {e}");
         }

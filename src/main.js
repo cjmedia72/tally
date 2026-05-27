@@ -66,6 +66,10 @@ let refreshTimer = null;
 let currentPeriod = "now";      // active data-view period
 let lastSnapshot = null;        // cached snapshot so picker re-renders without re-fetching
 let lastUpdateInfo = null;
+let refreshInFlight = false;
+let refreshQueued = false;
+let fitTimer = null;
+let fitRunId = 0;
 
 const PERIOD_LABELS = {
   now:   "TODAY",  // "Now" view shows today tokens but with MTD-anchored ROI
@@ -275,16 +279,27 @@ function render(snap) {
 }
 
 async function refresh() {
+  if (refreshInFlight) {
+    refreshQueued = true;
+    return;
+  }
+  refreshInFlight = true;
   const liveEl = el("pillLive");
   try {
     const snap = await invoke("get_snapshot", { refreshMs: settings.refreshMs });
     render(snap);
     if (liveEl) liveEl.textContent = "LIVE";
     // Refit window to content (handles freshness tag wrapping etc.)
-    setTimeout(fitWindowToContent, 30);
+    scheduleFitWindowToContent(30);
   } catch (err) {
     console.error("[usage-widget] snapshot error:", err);
     if (liveEl) liveEl.textContent = "ERROR";
+  } finally {
+    refreshInFlight = false;
+    if (refreshQueued) {
+      refreshQueued = false;
+      setTimeout(refresh, 250);
+    }
   }
 }
 
@@ -301,7 +316,14 @@ function widthForState(stateKey) {
 function nextFrame() {
   return new Promise((resolve) => requestAnimationFrame(() => resolve()));
 }
+function scheduleFitWindowToContent(delay = 50) {
+  clearTimeout(fitTimer);
+  fitTimer = setTimeout(() => {
+    void fitWindowToContent();
+  }, delay);
+}
 async function fitWindowToContent() {
+  const runId = ++fitRunId;
   let target, stateKey;
   if (document.body.classList.contains("state-expanded")) {
     target = el("panel");    stateKey = "expanded";
@@ -322,6 +344,7 @@ async function fitWindowToContent() {
   } catch (e) {}
   await nextFrame();
   await nextFrame();
+  if (runId !== fitRunId) return;
   void target.offsetHeight; // force layout at the final width before measuring height
   const rectHeight = target.getBoundingClientRect().height;
   const h = Math.ceil(Math.max(
@@ -340,25 +363,25 @@ async function expand() {
   document.body.classList.add("state-expanded");
   try { await invoke("resize_window", { expanded: true }); } catch (e) {}
   // After layout settles, shrink to exact content height
-  setTimeout(fitWindowToContent, 50);
+  scheduleFitWindowToContent(50);
 }
 async function compact() {
   document.body.classList.remove("state-collapsed", "state-expanded", "state-settings");
   document.body.classList.add("state-compact");
   try { await invoke("resize_window", { expanded: true }); } catch (e) {}
-  setTimeout(fitWindowToContent, 50);
+  scheduleFitWindowToContent(50);
 }
 async function collapse() {
   document.body.classList.remove("state-expanded", "state-compact", "state-settings");
   document.body.classList.add("state-collapsed");
   try { await invoke("resize_window", { expanded: false }); } catch (e) {}
-  setTimeout(fitWindowToContent, 50);
+  scheduleFitWindowToContent(50);
 }
 async function showSettings() {
   document.body.classList.remove("state-collapsed", "state-expanded", "state-compact");
   document.body.classList.add("state-settings");
   try { await invoke("set_window_size", { width: WIDTH_BY_STATE.settings, height: 540 }); } catch (e) {}
-  setTimeout(fitWindowToContent, 50);
+  scheduleFitWindowToContent(50);
 }
 
 // ── Apply settings to DOM/timers
@@ -556,7 +579,7 @@ function wireSettings() {
       settings.compactDataView = btn.dataset.compactDataView === "true";
       saveSettings(settings);
       applySettings();
-      setTimeout(fitWindowToContent, 30);
+      scheduleFitWindowToContent(30);
       ackPulse(btn);
     });
   });

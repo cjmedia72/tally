@@ -126,18 +126,24 @@ pub fn upsert_daily_usage(vendor: &str, rows: &BTreeMap<NaiveDate, DailyUsage>) 
         let path = root.join(format!("daily-usage-{year}.json"));
         let mut ledger = read_daily_ledger(&path).unwrap_or_else(DailyLedger::default);
         ledger.schema_version = 1;
+        let mut changed = false;
         for (date, usage) in rows {
             let day = ledger
                 .days
                 .entry(date.format("%Y-%m-%d").to_string())
                 .or_default();
             match vendor {
-                "claude" => upsert_vendor_day(&mut day.claude, usage),
-                "codex" => upsert_vendor_day(&mut day.codex, usage),
+                "claude" => changed |= upsert_vendor_day(&mut day.claude, usage),
+                "codex" => changed |= upsert_vendor_day(&mut day.codex, usage),
                 _ => return Err(anyhow!("unknown history vendor: {vendor}")),
             }
         }
-        std::fs::write(path, serde_json::to_string_pretty(&ledger)?)?;
+        if changed {
+            let body = serde_json::to_string_pretty(&ledger)?;
+            if std::fs::read_to_string(&path).ok().as_deref() != Some(body.as_str()) {
+                std::fs::write(path, body)?;
+            }
+        }
     }
 
     Ok(())
@@ -188,10 +194,13 @@ pub fn load_daily_periods(
     Ok(out)
 }
 
-fn upsert_vendor_day(slot: &mut Option<DailyUsage>, incoming: &DailyUsage) {
+fn upsert_vendor_day(slot: &mut Option<DailyUsage>, incoming: &DailyUsage) -> bool {
     match slot {
         Some(existing) => existing.keep_max(incoming),
-        None => *slot = Some(incoming.clone()),
+        None => {
+            *slot = Some(incoming.clone());
+            true
+        }
     }
 }
 
@@ -241,7 +250,8 @@ impl DailyUsage {
         self.api_equiv += other.api_equiv;
     }
 
-    fn keep_max(&mut self, other: &DailyUsage) {
+    fn keep_max(&mut self, other: &DailyUsage) -> bool {
+        let before = self.clone();
         self.tokens.input = self.tokens.input.max(other.tokens.input);
         self.tokens.output = self.tokens.output.max(other.tokens.output);
         self.tokens.cache_read = self.tokens.cache_read.max(other.tokens.cache_read);
@@ -250,6 +260,14 @@ impl DailyUsage {
         self.tokens.reasoning = self.tokens.reasoning.max(other.tokens.reasoning);
         self.requests = self.requests.max(other.requests);
         self.api_equiv = self.api_equiv.max(other.api_equiv);
+        self.tokens.input != before.tokens.input
+            || self.tokens.output != before.tokens.output
+            || self.tokens.cache_read != before.tokens.cache_read
+            || self.tokens.cache_write != before.tokens.cache_write
+            || self.tokens.cached_input != before.tokens.cached_input
+            || self.tokens.reasoning != before.tokens.reasoning
+            || self.requests != before.requests
+            || (self.api_equiv - before.api_equiv).abs() > f64::EPSILON
     }
 }
 

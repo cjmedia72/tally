@@ -54,22 +54,46 @@ pub fn codex_rate(model: &str) -> CodexRate {
     let m = model.to_lowercase();
     if m.contains("gpt-5-codex") {
         // gpt-5-codex SKU — same family as base gpt-5
-        CodexRate { input: 1.25, cached_input: 0.125, output: 10.00 }
+        CodexRate {
+            input: 1.25,
+            cached_input: 0.125,
+            output: 10.00,
+        }
     } else if m == "gpt-5" || m.starts_with("gpt-5-") && !m.contains("5.") && !m.contains("5-5") {
         // Plain gpt-5 (not 5.x variants)
-        CodexRate { input: 1.25, cached_input: 0.125, output: 10.00 }
+        CodexRate {
+            input: 1.25,
+            cached_input: 0.125,
+            output: 10.00,
+        }
     } else if m.contains("gpt-5.4") || m.contains("gpt-5-4") {
         // gpt-5.4 — between 5 and 5.5; treat as gpt-5.5 family by default
-        CodexRate { input: 5.00, cached_input: 0.50, output: 30.00 }
+        CodexRate {
+            input: 5.00,
+            cached_input: 0.50,
+            output: 30.00,
+        }
     } else if m.contains("gpt-5.5") || m.contains("gpt-5-5") {
         // GPT-5.5 standard public pricing
-        CodexRate { input: 5.00, cached_input: 0.50, output: 30.00 }
+        CodexRate {
+            input: 5.00,
+            cached_input: 0.50,
+            output: 30.00,
+        }
     } else if m.contains("o3") || m.contains("o4") {
         // Reasoning-heavy older models
-        CodexRate { input: 5.00, cached_input: 0.50, output: 20.00 }
+        CodexRate {
+            input: 5.00,
+            cached_input: 0.50,
+            output: 20.00,
+        }
     } else {
         // Unknown / future model — default to gpt-5.5 (current Codex CLI default)
-        CodexRate { input: 5.00, cached_input: 0.50, output: 30.00 }
+        CodexRate {
+            input: 5.00,
+            cached_input: 0.50,
+            output: 30.00,
+        }
     }
 }
 

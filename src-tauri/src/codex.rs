@@ -6,6 +6,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration as StdDuration;
 use walkdir::WalkDir;
 
@@ -541,6 +542,30 @@ struct CodexTokenUsageRaw {
     reasoning_output_tokens: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileSignature {
+    files: u64,
+    bytes: u64,
+    newest_mtime_ns: u128,
+    local_year: i32,
+    local_ordinal: u32,
+}
+
+#[derive(Debug, Default, Clone)]
+struct LocalTokenStats {
+    today: CodexPeriodStats,
+    d1: CodexPeriodStats,
+    d7: CodexPeriodStats,
+    d14: CodexPeriodStats,
+    d30: CodexPeriodStats,
+    mtd: CodexPeriodStats,
+}
+
+fn token_cache() -> &'static Mutex<Option<(FileSignature, LocalTokenStats)>> {
+    static CACHE: OnceLock<Mutex<Option<(FileSignature, LocalTokenStats)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
 pub fn collect() -> Result<CodexStats> {
     let mut stats = CodexStats::default();
 
@@ -604,6 +629,14 @@ pub fn collect() -> Result<CodexStats> {
         return Ok(stats);
     }
 
+    let mut jsonl_files: Vec<(PathBuf, std::fs::Metadata)> = Vec::new();
+    let mut signature = FileSignature {
+        files: 0,
+        bytes: 0,
+        newest_mtime_ns: 0,
+        local_year: now_local.year(),
+        local_ordinal: now_local.ordinal(),
+    };
     for entry in roots
         .iter()
         .flat_map(|r| WalkDir::new(r).into_iter())
@@ -613,14 +646,32 @@ pub fn collect() -> Result<CodexStats> {
         if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
             continue;
         }
-        if let Ok(meta) = entry.metadata() {
-            if let Ok(mtime) = meta.modified() {
-                let mt: DateTime<Utc> = mtime.into();
-                if mt < cutoff_30d {
-                    continue;
-                }
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if let Ok(mtime) = meta.modified() {
+            let mt: DateTime<Utc> = mtime.into();
+            if mt < cutoff_30d {
+                continue;
+            }
+            if let Ok(delta) = mtime.duration_since(std::time::UNIX_EPOCH) {
+                signature.newest_mtime_ns = signature.newest_mtime_ns.max(delta.as_nanos());
             }
         }
+        signature.files += 1;
+        signature.bytes = signature.bytes.saturating_add(meta.len());
+        jsonl_files.push((path, meta));
+    }
+
+    if let Some((cached_sig, cached)) = token_cache().lock().unwrap().as_ref() {
+        if *cached_sig == signature {
+            apply_local_token_stats(&mut stats, cached);
+            return Ok(stats);
+        }
+    }
+
+    for (path, _meta) in jsonl_files {
         let file = match File::open(&path) {
             Ok(f) => f,
             Err(_) => continue,
@@ -721,5 +772,26 @@ pub fn collect() -> Result<CodexStats> {
         eprintln!("[tally] codex daily history backfill failed: {e}");
     }
 
+    *token_cache().lock().unwrap() = Some((signature, local_token_stats_from(&stats)));
     Ok(stats)
+}
+
+fn local_token_stats_from(stats: &CodexStats) -> LocalTokenStats {
+    LocalTokenStats {
+        today: stats.today.clone(),
+        d1: stats.d1.clone(),
+        d7: stats.d7.clone(),
+        d14: stats.d14.clone(),
+        d30: stats.d30.clone(),
+        mtd: stats.mtd.clone(),
+    }
+}
+
+fn apply_local_token_stats(stats: &mut CodexStats, local: &LocalTokenStats) {
+    stats.today = local.today.clone();
+    stats.d1 = local.d1.clone();
+    stats.d7 = local.d7.clone();
+    stats.d14 = local.d14.clone();
+    stats.d30 = local.d30.clone();
+    stats.mtd = local.mtd.clone();
 }
