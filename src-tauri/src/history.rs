@@ -75,7 +75,7 @@ pub fn record_snapshot(snapshot: &UsageSnapshot) -> Result<bool> {
     if let Some(marker) = read_marker(&marker_path) {
         let same_day = marker.local_date == local_date;
         let age = now.signed_duration_since(marker.logged_at).num_seconds();
-        if same_day && age >= 0 && age < MIN_HISTORY_INTERVAL_SECS {
+        if same_day && (0..MIN_HISTORY_INTERVAL_SECS).contains(&age) {
             return Ok(false);
         }
     }
@@ -124,7 +124,7 @@ pub fn upsert_daily_usage(vendor: &str, rows: &BTreeMap<NaiveDate, DailyUsage>) 
 
     for (year, rows) in by_year {
         let path = root.join(format!("daily-usage-{year}.json"));
-        let mut ledger = read_daily_ledger(&path).unwrap_or_else(DailyLedger::default);
+        let mut ledger = read_daily_ledger(&path).unwrap_or_default();
         ledger.schema_version = 1;
         let mut changed = false;
         for (date, usage) in rows {

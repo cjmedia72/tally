@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
-const RELEASES_API: &str = "https://api.github.com/repos/cjmedia72/tally/releases/latest";
+const RELEASES_API: &str = "https://api.github.com/repos/EcomCJ/Tally/releases/latest";
 
 #[derive(Debug, Serialize)]
 pub struct UpdateInfo {
@@ -49,7 +49,7 @@ pub fn check(current_version: &str) -> Result<UpdateInfo> {
         release_url: Some(release.html_url.clone()),
         download_url: asset
             .map(|a| a.browser_download_url.clone())
-            .or_else(|| Some(release.html_url)),
+            .or(Some(release.html_url)),
         asset_name: asset.map(|a| a.name.clone()),
         notes: release.body,
     })

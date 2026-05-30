@@ -1,19 +1,13 @@
-use anyhow;
 use chrono::{DateTime, Utc};
 
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ClaudeLimitSource {
     Oauth,
     Cli,
     Web,
+    #[default]
     Cache,
-}
-
-impl Default for ClaudeLimitSource {
-    fn default() -> Self {
-        ClaudeLimitSource::Cache
-    }
 }
 
 impl ClaudeLimitSource {

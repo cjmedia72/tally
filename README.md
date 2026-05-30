@@ -55,7 +55,7 @@ Download the Windows `.msi` or `.exe` installer from the [Releases page](../../r
 ### From Source
 
 ```bash
-git clone https://github.com/cjmedia72/tally
+git clone https://github.com/EcomCJ/Tally
 cd tally
 npm install
 npx tauri dev

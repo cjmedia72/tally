@@ -24,9 +24,14 @@ const DEFAULT_SETTINGS = {
   //                e.g. 7D leverage = 7d_spend / (7/30 × monthly_sub)
   roiMode: "prorated",
 };
+const ALLOWED_REFRESH_MS = new Set([60_000, 120_000, 300_000, 600_000]);
 
 function normalizeSettings(s) {
   const next = { ...DEFAULT_SETTINGS, ...s };
+  next.refreshMs = Number(next.refreshMs);
+  if (!ALLOWED_REFRESH_MS.has(next.refreshMs)) {
+    next.refreshMs = DEFAULT_SETTINGS.refreshMs;
+  }
   next.showTrayIcon = next.showTrayIcon !== false;
   next.showTaskbarIcon = next.showTaskbarIcon === true;
   next.compactDataView = next.compactDataView === true;
@@ -513,7 +518,7 @@ function wireSettings() {
   el("btnSettingsBack")?.addEventListener("click", expand);
 
   el("optInterval")?.addEventListener("change", (e) => {
-    settings.refreshMs = parseInt(e.target.value, 10) || 30000;
+    settings.refreshMs = parseInt(e.target.value, 10);
     saveSettings(settings);
     applySettings();
     ackPulse(e.target);

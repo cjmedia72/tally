@@ -170,11 +170,10 @@ fn fetch_cli_usage_limits_once(timeout: StdDuration) -> Result<ClaudeLiveLimits>
         dump_cli_output_tail(&output);
     }
 
-    parse_cli_usage_limits(&output).map_err(|err| {
+    parse_cli_usage_limits(&output).inspect_err(|_| {
         if std::env::var_os("TALLY_CLAUDE_DEBUG_CLI_OUTPUT").is_some() {
             dump_cli_output_tail(&output);
         }
-        err
     })
 }
 

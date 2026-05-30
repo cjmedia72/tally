@@ -18,6 +18,8 @@ mod updater;
 
 const COLLAPSED: (f64, f64) = (272.0, 122.0);
 const EXPANDED: (f64, f64) = (640.0, 510.0);
+const DEFAULT_REFRESH_MS: u64 = 120_000;
+const MIN_REFRESH_MS: u64 = 60_000;
 const APP_ICON_PNG: &[u8] = include_bytes!("../icons/icon.png");
 
 struct ShellState {
@@ -26,8 +28,8 @@ struct ShellState {
 
 /// Returns a fresh usage snapshot. `refresh_ms` is the user's UI refresh
 /// interval — the backend cache TTL is tied to this so each UI poll gets
-/// data at most that old. Floor 30s to avoid hammering the API if a user
-/// picks an extreme value.
+/// data at most that old. Floor 60s to avoid hammering the API if legacy
+/// localStorage or a bad caller provides an extreme value.
 /// Run on a worker thread via `spawn_blocking` so the JSONL walk (currently
 /// up to ~900+ files for heavy Claude/Codex users) and any HTTP calls never
 /// block the WebView UI thread. Prior sync version caused 5-30s freezes on
@@ -37,7 +39,8 @@ struct ShellState {
 #[tauri::command]
 async fn get_snapshot(refresh_ms: Option<u64>) -> Result<snapshot::UsageSnapshot, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let snap = snapshot::build(refresh_ms.unwrap_or(120_000)).map_err(|e| e.to_string())?;
+        let refresh_ms = refresh_ms.unwrap_or(DEFAULT_REFRESH_MS).max(MIN_REFRESH_MS);
+        let snap = snapshot::build(refresh_ms).map_err(|e| e.to_string())?;
         if let Err(e) = history::record_snapshot(&snap) {
             eprintln!("[tally] usage history write failed: {e}");
         }
@@ -88,7 +91,11 @@ fn check_for_update() -> Result<updater::UpdateInfo, String> {
 
 #[tauri::command]
 fn open_update_url(url: String) -> Result<(), String> {
-    if !url.starts_with("https://github.com/cjmedia72/tally/releases/") {
+    let allowed = [
+        "https://github.com/EcomCJ/Tally/releases/",
+        "https://github.com/cjmedia72/tally/releases/",
+    ];
+    if !allowed.iter().any(|prefix| url.starts_with(prefix)) {
         return Err("Update URL is outside the Tally GitHub releases page.".to_string());
     }
 
@@ -203,37 +210,6 @@ pub fn run() {
             let _ = window.set_skip_taskbar(true);
             let _ = pin_top_right(&window);
             let _ = window.show();
-
-            // Boot diagnostic — both sources should now be LIVE
-            match snapshot::build(120_000) {
-                Ok(snap) => {
-                    let cl = snap
-                        .claude
-                        .as_ref()
-                        .map(|c| {
-                            format!(
-                                "5h={:.0}% wk={:.0}%",
-                                c.five_hour.used_percent, c.weekly.used_percent
-                            )
-                        })
-                        .unwrap_or_else(|| "not connected".to_string());
-                    let cx = snap
-                        .codex
-                        .as_ref()
-                        .map(|c| {
-                            format!(
-                                "5h={:.0}% wk={:.0}%",
-                                c.five_hour.used_percent, c.weekly.used_percent
-                            )
-                        })
-                        .unwrap_or_else(|| "not connected".to_string());
-                    eprintln!(
-                        "[tally] boot LIVE: claude({}) | codex({}) | roi={:.1}x",
-                        cl, cx, snap.roi.leverage
-                    );
-                }
-                Err(e) => eprintln!("[tally] snapshot error: {}", e),
-            }
 
             let tray = build_tray(app.handle())?;
             *app.state::<ShellState>().tray.lock().unwrap() = Some(tray);
