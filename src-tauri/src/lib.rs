@@ -217,10 +217,20 @@ fn placement_path() -> Option<std::path::PathBuf> {
 fn read_window_placement() -> Option<WindowPlacement> {
     let path = placement_path()?;
     let body = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&body).ok()
+    let placement: WindowPlacement = serde_json::from_str(&body).ok()?;
+    is_visible_position(placement.x, placement.y).then_some(placement)
+}
+
+fn is_visible_position(x: i32, y: i32) -> bool {
+    // Windows reports hidden/minimized windows around -32000,-32000. Never
+    // persist or restore that sentinel as a real user-chosen placement.
+    x > -30_000 && y > -30_000
 }
 
 fn write_window_placement(pos: tauri::PhysicalPosition<i32>) {
+    if !is_visible_position(pos.x, pos.y) {
+        return;
+    }
     let Some(path) = placement_path() else {
         return;
     };
@@ -326,5 +336,17 @@ fn toggle_main(app: &AppHandle) {
             let _ = win.show();
             let _ = win.set_focus();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_visible_position;
+
+    #[test]
+    fn rejects_windows_hidden_window_sentinel_position() {
+        assert!(!is_visible_position(-32_000, -32_000));
+        assert!(!is_visible_position(100, -32_000));
+        assert!(is_visible_position(2784, 36));
     }
 }
