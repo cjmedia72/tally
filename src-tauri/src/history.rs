@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use chrono::{DateTime, Datelike, Days, Local, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, Local, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
@@ -213,12 +213,10 @@ fn period_keys_for_date(
     if date == today {
         keys.push("today");
     }
-    for (key, days) in [("1d", 1), ("7d", 7), ("14d", 14), ("30d", 30)] {
-        let start = today.checked_sub_days(Days::new(days - 1)).unwrap_or(today);
-        if date >= start && date <= today {
-            keys.push(key);
-        }
-    }
+    // The persisted ledger is day-granular. Do not emit rolling windows from it:
+    // 1D/7D/14D/30D are "now - N days" timestamp windows, while this ledger can
+    // only prove calendar-day buckets. Keep it for Today/MTD and let live JSONL
+    // timestamp scans drive all rolling chips.
     if date >= month_start && date <= today {
         keys.push("mtd");
     }
@@ -317,15 +315,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rolling_30d_is_today_plus_29_prior_calendar_days() {
+    fn daily_history_only_supplies_calendar_periods() {
         let today = NaiveDate::from_ymd_opt(2026, 5, 21).unwrap();
         let month_start = NaiveDate::from_ymd_opt(2026, 5, 1).unwrap();
 
-        let first_in_window = NaiveDate::from_ymd_opt(2026, 4, 22).unwrap();
-        assert!(period_keys_for_date(first_in_window, today, month_start).contains(&"30d"));
+        let keys = period_keys_for_date(today, today, month_start);
 
-        let outside_window = NaiveDate::from_ymd_opt(2026, 4, 21).unwrap();
-        assert!(!period_keys_for_date(outside_window, today, month_start).contains(&"30d"));
+        assert!(keys.contains(&"today"));
+        assert!(keys.contains(&"mtd"));
+        for rolling_key in ["1d", "7d", "14d", "30d"] {
+            assert!(!keys.contains(&rolling_key));
+        }
     }
 
     #[test]
